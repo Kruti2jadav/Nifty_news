@@ -1,0 +1,10 @@
+/vendor
+/node_modules
+/public/storage
+/storage/*
+/bootstrap/cache/*
+.env
+.env.*
+public/video/
+*.mp4
+*.zip

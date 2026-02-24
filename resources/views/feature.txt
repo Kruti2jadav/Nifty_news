@@ -1,0 +1,634 @@
+   private $baseUrl = "https://api.upstox.com/v2";
+
+    private function headers()
+    {
+        return [
+            'Authorization' => 'Bearer ' . env('UPSTOX_ACCESS_TOKEN'),
+            'Accept' => 'application/json'
+        ];
+    }
+
+    /* ============================================
+       FETCH INDEX DATA (NIFTY / SENSEX etc)
+    ============================================ */
+    private function fetchIndex($instrumentKey)
+    {
+        try {
+
+            $response = Http::withHeaders($this->headers())
+                ->get($this->baseUrl . "/market-quote/quotes", [
+                    'instrument_key' => $instrumentKey
+                ]);
+
+            if (!$response->successful()) return null;
+
+            $data = $response['data'][$instrumentKey] ?? null;
+
+            if (!$data) return null;
+
+            return [
+                'price' => $data['last_price'],
+                'changePts' => $data['net_change'],
+                'changePercent' => $data['percent_change'],
+            ];
+
+        } catch (\Exception $e) {
+            return null;
+        }
+    }
+
+    /* ============================================
+       FETCH HISTORICAL 5 MIN CANDLES (FOR CHART)
+    ============================================ */
+    private function fetchIntradayChart($instrumentKey)
+    {
+        try {
+
+            $response = Http::withHeaders($this->headers())
+                ->get($this->baseUrl . "/historical-candle/intraday/{$instrumentKey}/5minute");
+
+            if (!$response->successful()) return null;
+
+            $candles = $response['data']['candles'] ?? [];
+
+            $labels = [];
+            $prices = [];
+
+            foreach ($candles as $candle) {
+                $labels[] = date('H:i', strtotime($candle[0]));
+                $prices[] = $candle[4]; // close price
+            }
+
+            return [
+                'labels' => $labels,
+                'prices' => $prices
+            ];
+
+        } catch (\Exception $e) {
+            return null;
+        }
+    }
+
+    /* ============================================
+       FETCH NSE STOCK LIST (AUTO LOAD)
+    ============================================ */
+    private function getUpstoxMasterData()
+{
+    $url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz";
+
+    $response = Http::timeout(20)->get($url);
+
+    if (!$response->successful()) {
+        dd("Unable to download Upstox master file");
+    }
+
+    // Decompress GZ
+    $decoded = gzdecode($response->body());
+
+    if (!$decoded) {
+        dd("Failed to decode GZ file");
+    }
+
+    $data = json_decode($decoded, true);
+
+    if (!$data) {
+        dd("Invalid JSON in master file");
+    }
+
+    return $data;
+}
+private function fetchNseStocks()
+{
+    $csvPath = app_path('EQUITY_L.csv');
+
+    if (!file_exists($csvPath)) {
+        dd("CSV NOT FOUND");
+    }
+
+    // Load CSV
+    $rows = array_map('str_getcsv', file($csvPath));
+    $header = array_shift($rows);
+
+    $header = array_map(function ($h) {
+        return trim(strtoupper($h));
+    }, $header);
+
+    $isinIndex = array_search('ISIN NUMBER', $header);
+
+    if ($isinIndex === false) {
+        dd("ISIN column not found", $header);
+    }
+
+    $csvIsins = [];
+
+    foreach ($rows as $row) {
+        if (!isset($row[$isinIndex])) continue;
+        $isin = trim($row[$isinIndex]);
+        if (!empty($isin)) {
+            $csvIsins[$isin] = true;
+        }
+    }
+
+    // Load Upstox master
+    $master = $this->getUpstoxMasterData();
+
+    $instrumentKeys = [];
+
+    foreach ($master as $instrument) {
+
+        if (
+            isset($instrument['isin']) &&
+            isset($instrument['instrument_key']) &&
+            $instrument['segment'] === 'NSE_EQ'
+        ) {
+
+            if (isset($csvIsins[$instrument['isin']])) {
+                $instrumentKeys[] = $instrument['instrument_key'];
+            }
+        }
+    }
+
+    if (empty($instrumentKeys)) {
+        dd("No matching instruments found.");
+    }
+
+    return array_slice($instrumentKeys, 0, 200); // limit for performance
+}
+
+    /* ============================================
+       FETCH MULTIPLE QUOTES
+    ============================================ */
+  private function fetchQuotes($instrumentKeys)
+{
+    $chunks = array_chunk($instrumentKeys, 50);
+    $allData = [];
+
+    foreach ($chunks as $chunk) {
+
+        $response = Http::withHeaders($this->headers())
+            ->get($this->baseUrl . "/market-quote/quotes", [
+                'instrument_key' => implode(',', $chunk)
+            ]);
+
+        if ($response->successful()) {
+            $allData = array_merge(
+                $allData,
+                $response['data'] ?? []
+            );
+        }
+    }
+
+    return $allData;
+}
+    /* ============================================
+       HOME PAGE
+    ============================================ */
+    public function home()
+    {
+        /* ---------------- INDEX DATA ---------------- */
+
+        $indicesMap = [ 
+            'NIFTY 50'   => 'NSE_INDEX|Nifty 50',
+            'BSE Sensex' => 'BSE_INDEX|SENSEX', 
+            'NIFTY BANK' => 'NSE_INDEX|Nifty Bank',
+            'NIFTY IT'   => 'NSE_INDEX|Nifty IT',
+        ];
+
+        $marketData = [];
+
+        foreach ($indicesMap as $name => $key) {
+
+            $data = $this->fetchIndex($key);
+
+            if ($data) {
+
+                $marketData[$name] = $data;
+
+                Index::create([
+                    'symbol' => $key,
+                    'name' => $name,
+                    'price' => $data['price'],
+                    'change_pts' => $data['changePts'],
+                    'change_percent' => $data['changePercent'],
+                ]);
+            }
+        }
+
+        /* Specific Variables */
+        $niftyPrice   = $marketData['NIFTY 50']['price'] ?? null;
+        $niftyChange  = $marketData['NIFTY 50']['changePercent'] ?? 0;
+        $sensexPrice  = $marketData['BSE Sensex']['price'] ?? null;
+        $sensexChange = $marketData['BSE Sensex']['changePercent'] ?? 0;
+
+        /* ---------------- CHART ---------------- */
+        $chart = $this->fetchIntradayChart('NSE_INDEX|Nifty 50');
+
+        $labels = $chart['labels'] ?? [];
+        $prices = $chart['prices'] ?? [];
+
+        /* ---------------- STOCK SCREENER LOGIC ---------------- */
+
+        $instrumentKeys = $this->fetchNseStocks();
+        $quotes = $this->fetchQuotes($instrumentKeys);
+
+        $stocks = [];
+
+        foreach ($quotes as $key => $stock) {
+
+            $turnover = $stock['last_price'] * $stock['volume'];
+
+            $stocks[] = [
+                'symbol' => $stock['symbol'],
+                'name' => $stock['symbol'],
+                'price' => $stock['last_price'],
+                'change_pts' => $stock['net_change'],
+                'change_percent' => $stock['percent_change'],
+                'volume' => $stock['volume'],
+                'turnover' => $turnover,
+                'high_52' => $stock['ohlc']['high'],
+                'low_52' => $stock['ohlc']['low'],
+            ];
+        }
+
+        /* SORTING */
+
+        $gainers = collect($stocks)->sortByDesc('change_percent')->take(10)->values();
+        $losers = collect($stocks)->sortBy('change_percent')->take(10)->values();
+        $mostActive = collect($stocks)->sortByDesc('volume')->take(10)->values();
+        $mostActiveValue = collect($stocks)->sortByDesc('turnover')->take(10)->values();
+
+        $weekHigh = collect($stocks)->sortByDesc('high_52')->take(10)->values();
+        $weekLow = collect($stocks)->sortBy('low_52')->take(10)->values();
+
+        $topGainers = $gainers;
+        $topLosers = $losers;
+
+        /* SAVE STOCKS */
+
+        foreach ($stocks as $stock) {
+            Stock::create([
+                'symbol' => $stock['symbol'],
+                'name' => $stock['name'],
+                'type' => 'live',
+                'price' => $stock['price'],
+                'change_pts' => $stock['change_pts'],
+                'change_percent' => $stock['change_percent'],
+            ]);
+        }
+
+        /* ---------------- RETURN VIEW ---------------- */
+
+        return view('welcome', compact(
+            'labels',
+            'prices',
+            'niftyPrice',
+            'niftyChange',
+            'sensexPrice',
+            'sensexChange',
+            'marketData',
+            'gainers',
+            'losers',
+            'mostActive',
+            'mostActiveValue',
+            'topGainers',
+            'topLosers',
+            'weekHigh',
+            'weekLow'
+        ));
+    }
+create a complete individual page its just like use component like navbar sidebar and footer explain in detail and give complete code even for api like .env or service file
+
+Perfect 🔥
+Now we build a complete Individual Stock Page using:
+
+✅ Laravel
+
+✅ Breeze API (ICICI Direct)
+
+✅ NewsAPI (for news correlation)
+
+✅ Volume Spike Detection (15-min logic)
+
+✅ Intelligence Card
+
+✅ Using your existing components.app layout (navbar + sidebar + footer)
+
+I will give you:
+
+.env
+
+Breeze Service Class
+
+News Service Class
+
+Controller
+
+Route
+
+Blade View (Complete Page)
+
+Database (optional spike logging)
+
+Explanation of how everything works
+
+✅ 1️⃣ .ENV CONFIGURATION
+
+Add this in your .env
+
+BREEZE_API_KEY=your_breeze_api_key
+BREEZE_API_SECRET=your_breeze_secret
+BREEZE_SESSION_TOKEN=your_breeze_session_token
+
+NEWS_API_KEY=your_newsapi_key
+
+
+Then update config/services.php:
+
+'breeze' => [
+    'key' => env('BREEZE_API_KEY'),
+    'secret' => env('BREEZE_API_SECRET'),
+    'session' => env('BREEZE_SESSION_TOKEN'),
+],
+
+'newsapi' => [
+    'key' => env('NEWS_API_KEY'),
+],
+
+✅ 2️⃣ Breeze Service (Clean Architecture)
+
+Create:
+
+app/Services/BreezeService.php
+
+<?php
+
+namespace App\Services;
+
+use Illuminate\Support\Facades\Http;
+
+class BreezeService
+{
+    protected $baseUrl = 'https://api.icicidirect.com/breezeapi/api/v1';
+
+    public function historical($symbol, $from, $to)
+    {
+        return Http::withHeaders([
+            'X-API-KEY' => config('services.breeze.key'),
+            'X-SESSION-TOKEN' => config('services.breeze.session'),
+        ])->get($this->baseUrl . '/historicalcharts', [
+            'stock_code' => $symbol,
+            'exchange_code' => 'NSE',
+            'interval' => '1minute',
+            'from_date' => $from,
+            'to_date' => $to
+        ])->json();
+    }
+
+    public function quote($symbol)
+    {
+        return Http::withHeaders([
+            'X-API-KEY' => config('services.breeze.key'),
+            'X-SESSION-TOKEN' => config('services.breeze.session'),
+        ])->get($this->baseUrl . '/quotes', [
+            'stock_code' => $symbol,
+            'exchange_code' => 'NSE'
+        ])->json();
+    }
+}
+
+✅ 3️⃣ News Service
+
+Create:
+
+app/Services/NewsService.php
+
+<?php
+
+namespace App\Services;
+
+use Illuminate\Support\Facades\Http;
+
+class NewsService
+{
+    public function fetch($symbol)
+    {
+        $response = Http::get("https://newsapi.org/v2/everything", [
+            'q' => $symbol,
+            'sortBy' => 'publishedAt',
+            'apiKey' => config('services.newsapi.key')
+        ]);
+
+        return $response->json()['articles'] ?? [];
+    }
+}
+
+✅ 4️⃣ Stock Controller
+
+Create:
+
+app/Http/Controllers/StockController.php
+
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Services\BreezeService;
+use App\Services\NewsService;
+use Carbon\Carbon;
+
+class StockController extends Controller
+{
+    protected $breeze;
+    protected $news;
+
+    public function __construct(BreezeService $breeze, NewsService $news)
+    {
+        $this->breeze = $breeze;
+        $this->news = $news;
+    }
+
+    public function show($symbol)
+    {
+        $from = now()->subDays(2)->format('Y-m-d');
+        $to = now()->format('Y-m-d');
+
+        $historical = $this->breeze->historical($symbol, $from, $to);
+        $quote = $this->breeze->quote($symbol);
+
+        $candles = $historical['Success'] ?? [];
+
+        // --------- VOLUME GROUPING ----------
+        $volumes = [];
+
+        foreach ($candles as $candle) {
+            $time = Carbon::parse($candle['datetime']);
+            $block = $time->format('Y-m-d H') . floor($time->minute / 15);
+
+            $volumes[$block] = ($volumes[$block] ?? 0) + $candle['volume'];
+        }
+
+        $currentVolume = end($volumes) ?: 0;
+        $avgVolume = collect($volumes)->avg() ?: 1;
+
+        $isSpike = $currentVolume > 1500000 || $currentVolume > ($avgVolume * 2);
+
+        $news = $isSpike ? $this->news->fetch($symbol) : [];
+
+        $price = $quote['Success'][0]['ltp'] ?? 0;
+
+        return view('stocks.show', compact(
+            'symbol',
+            'price',
+            'candles',
+            'isSpike',
+            'currentVolume',
+            'avgVolume',
+            'news'
+        ));
+    }
+}
+
+✅ 5️⃣ Route
+
+In routes/web.php
+
+Route::get('/stock/{symbol}', [StockController::class, 'show'])
+    ->name('stock.show');
+
+✅ 6️⃣ COMPLETE BLADE PAGE
+
+Create:
+
+resources/views/stocks/show.blade.php
+
+@extends('components.app')
+
+@section('content')
+
+<div class="container my-4">
+
+    <div class="card shadow-sm mb-4">
+        <div class="card-body">
+
+            <h3 class="fw-bold">{{ $symbol }}</h3>
+
+            <h2 class="text-primary">
+                ₹{{ number_format($price,2) }}
+            </h2>
+
+        </div>
+    </div>
+
+    <!-- Chart -->
+    <div class="card shadow-sm mb-4">
+        <div class="card-body">
+            <div style="height:350px;">
+                <canvas id="chart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <!-- Intelligence Block -->
+    @if($isSpike)
+    <div class="card shadow-sm border-danger">
+        <div class="card-body">
+
+            <h5 class="fw-bold text-danger">
+                🚨 Volume Impact Detected
+            </h5>
+
+            <p>
+                15-min Volume:
+                <strong>{{ number_format($currentVolume) }}</strong>
+            </p>
+
+            <p>
+                Average 15-min Volume:
+                <strong>{{ number_format($avgVolume) }}</strong>
+            </p>
+
+            <hr>
+
+            <h6 class="fw-bold">Related News</h6>
+
+            @foreach($news as $article)
+                <div class="mb-3">
+                    <a href="{{ $article['url'] }}" target="_blank">
+                        {{ $article['title'] }}
+                    </a>
+                </div>
+            @endforeach
+
+            <hr>
+
+            <h6 class="fw-bold">Possible Impact</h6>
+
+            @if($currentVolume > $avgVolume * 3)
+                <p class="text-danger">High volatility expected.</p>
+            @elseif($currentVolume > $avgVolume * 2)
+                <p class="text-warning">Short-term price movement likely.</p>
+            @else
+                <p class="text-muted">Moderate trading interest.</p>
+            @endif
+
+        </div>
+    </div>
+    @endif
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<script>
+new Chart(document.getElementById('chart'), {
+    type: 'line',
+    data: {
+        labels: @json(collect($candles)->pluck('datetime')),
+        datasets: [{
+            data: @json(collect($candles)->pluck('close')),
+            borderColor: '#198754',
+            fill: false,
+            tension: 0.3,
+            pointRadius: 0
+        }]
+    },
+    options: {
+        responsive: true,
+        plugins: { legend: { display: false } },
+        scales: { x: { display: false } }
+    }
+});
+</script>
+
+@endsection
+
+🧠 HOW THIS PAGE WORKS
+
+User visits:
+
+/stock/RELIANCE
+
+
+Laravel:
+
+Calls Breeze API
+
+Fetches 1-min candles
+
+Calculates 15-min volume
+
+Detects spike
+
+Fetches related news
+
+Shows Intelligence Card
+
+🚀 WHAT YOU NOW HAVE
+
+✔ Individual stock page
+✔ Real-time price
+✔ Chart
+✔ Volume spike detection
+✔ News correlation
+✔ Future impact logic
+✔ Clean architecture
