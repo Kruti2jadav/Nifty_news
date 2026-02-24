@@ -1,0 +1,100 @@
+NIFTY NEWS
+Laravel Financial News & Market Insights Platform
+
+PROJECT DESCRIPTION
+
+Nifty News is a Laravel-based web application that provides real-time financial news, stock updates, and market analysis tools.
+
+SYSTEM REQUIREMENTS
+
+Make sure the following are installed on your system:
+
+PHP 8.1 or higher
+
+Composer
+
+Node.js and npm
+
+MySQL
+
+Git
+
+XAMPP / WAMP / Laragon (recommended for Windows)
+
+HOW TO RUN THE PROJECT ON LOCALHOST
+
+STEP 1: Clone the Repository
+
+Open terminal or PowerShell and run:
+
+git clone https://github.com/Kruti2jadav/Nifty_News_main.git
+
+cd Nifty_News_main
+
+STEP 2: Install PHP Dependencies
+
+composer install
+
+STEP 3: Install Node Dependencies
+
+npm install
+
+STEP 4: Create Environment File
+
+If using Command Prompt:
+
+copy .env.example .env
+
+If using Git Bash:
+
+cp .env.example .env
+
+STEP 5: Generate Application Key
+
+php artisan key:generate
+
+STEP 6: Configure Database
+
+Open the .env file and update:
+
+DB_DATABASE=your_database_name
+DB_USERNAME=root
+DB_PASSWORD=
+
+SESSION_DRIVER=file
+
+STEP 8: Build Frontend Assets
+
+For development:
+
+npm run dev
+
+For production:
+
+npm run build
+
+STEP 9: Start Laravel Server
+
+php artisan serve
+
+Open your browser and go to:
+
+http://127.0.0.1:8000
+
+IMPORTANT NOTES
+
+Do NOT upload vendor folder to GitHub
+
+Do NOT upload node_modules folder
+
+Do NOT upload .env file
+
+Do NOT upload large video/media files
+
+After cloning project, always run:
+composer install
+npm install
+
+DEVELOPER
+
+Kruti Jadav
